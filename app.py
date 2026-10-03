@@ -11,39 +11,57 @@ import re
 # 1. LIVE DATA SCRAPER & FEATURE EXTRACTOR
 # ==========================================
 class PlayerDataFetcher:
+    HEADERS = {
+        "User-Agent": "UniversalFootballerScoreApp/4.0 (contact: test@example.com) python-requests"
+    }
+
     @staticmethod
     def search_wikipedia(player_name: str) -> dict:
         session = requests.Session()
         search_url = "https://en.wikipedia.org/w/api.php"
+        
+        # Search query
         params = {
             "action": "query",
             "list": "search",
             "srsearch": f"{player_name} footballer",
             "format": "json"
         }
-        res = session.get(search_url, params=params).json()
-        if not res.get("query", {}).get("search"):
+        
+        try:
+            res = session.get(search_url, params=params, headers=PlayerDataFetcher.HEADERS, timeout=10)
+            if res.status_code != 200:
+                return None
+            search_json = res.json()
+            search_results = search_json.get("query", {}).get("search", [])
+            if not search_results:
+                return None
+            
+            page_title = search_results[0]["title"]
+            
+            # Fetch page content
+            parse_params = {
+                "action": "parse",
+                "page": page_title,
+                "prop": "text",
+                "format": "json"
+            }
+            page_res = session.get(search_url, params=parse_params, headers=PlayerDataFetcher.HEADERS, timeout=10)
+            if page_res.status_code != 200:
+                return None
+            page_data = page_res.json()
+            raw_html = page_data.get("parse", {}).get("text", {}).get("*", "")
+            
+            return PlayerDataFetcher.parse_wiki_html(raw_html, page_title)
+        except Exception:
             return None
-        
-        page_title = res["query"]["search"][0]["title"]
-        
-        parse_params = {
-            "action": "parse",
-            "page": page_title,
-            "prop": "text",
-            "format": "json"
-        }
-        page_data = session.get(search_url, params=parse_params).json()
-        raw_html = page_data.get("parse", {}).get("text", {}).get("*", "")
-        
-        return PlayerDataFetcher.parse_wiki_html(raw_html, page_title)
 
     @staticmethod
     def parse_wiki_html(html: str, player_name: str) -> dict:
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text()
 
-        # 1. Detect Position
+        # 1. Position
         pos = "FW"
         if re.search(r'\b(midfielder|winger)\b', text, re.IGNORECASE):
             pos = "MF"
@@ -52,23 +70,23 @@ class PlayerDataFetcher:
         if re.search(r'\b(goalkeeper)\b', text, re.IGNORECASE):
             pos = "GK"
 
-        # 2. Extract Career Dates & Longevity
+        # 2. Longevity & Era
         years = re.findall(r'\b(19\d\d|20[0-2]\d)\b', text)
         years = [int(y) for y in years if 1930 <= int(y) <= 2026]
-        start_year = min(years) if years else 2005
-        end_year = max(years) if years else 2024
+        start_year = min(years) if years else 2010
+        end_year = max(years) if years else 2025
         longevity = max(1, min(24, end_year - start_year))
 
-        # 3. Detect Era & Measurement Uncertainty
+        # Modern vs Classic era uncertainty
         is_modern = start_year >= 2005
         sigma_base = 0.08 if is_modern else (0.15 if start_year >= 1990 else 0.25)
 
-        # 4. Count Key Honors & Trophies via keyword scan
+        # 3. Trophies
         wc_wins = len(re.findall(r'FIFA World Cup(?:\s*winner|\s*\(\d{4}\)|\s*champion)', text, re.I))
         ucl_wins = len(re.findall(r'UEFA Champions League(?:\s*winner|\s*\(\d{4}\))', text, re.I))
         ballon_dor = len(re.findall(r'Ballon d\'Or(?:\s*winner|\s*\(\d{4}\)|\s*:\s*\d{4})', text, re.I))
 
-        # 5. Extract Goals & Caps
+        # 4. Senior Caps & Goals
         goals = 0
         appearances = 0
         info_table = soup.find("table", class_="infobox")
@@ -82,7 +100,7 @@ class PlayerDataFetcher:
                     if len(valid) >= 2:
                         appearances, goals = valid[-2], valid[-1]
 
-        goals_per_game = goals / max(1, appearances) if appearances > 50 else 0.45
+        goals_per_game = goals / max(1, appearances) if appearances > 30 else 0.45
 
         return {
             "name": player_name,
@@ -105,9 +123,9 @@ class PlayerDataFetcher:
         pos = meta.get("position", "FW")
 
         if pos == "FW":
-            pk_z = min(5.2, max(1.5, (gpg - 0.25) * 5.5 + 2.0))
+            pk_z = min(5.2, max(1.5, (gpg - 0.20) * 5.5 + 2.0))
         elif pos == "MF":
-            pk_z = min(4.8, max(1.5, (gpg - 0.12) * 6.0 + 2.5))
+            pk_z = min(4.8, max(1.5, (gpg - 0.10) * 6.0 + 2.5))
         elif pos == "DF":
             pk_z = min(4.6, 2.8 + (meta["ucl"] * 0.25))
         else:
@@ -141,7 +159,7 @@ class UFS4Engine:
         self.center = 3.0
         self.scale = 0.5
 
-    def simulate(self, players: list, n_samples=20_000, seed=42):
+    def simulate(self, players: list, n_samples=15_000, seed=42):
         np.random.seed(seed)
         n_p = len(players)
         n_k = len(self.PILLARS)
@@ -214,7 +232,7 @@ st.subheader("🔍 Add Any Player via Live Web Search")
 col_input, col_btn = st.columns([3, 1])
 
 with col_input:
-    query = st.text_input("Enter player name (e.g., Zinedine Zidane, Paolo Maldini, Erling Haaland):")
+    query = st.text_input("Enter player name (e.g., Erling Haaland, Zinedine Zidane, Paolo Maldini):", key="search_box")
 
 with col_btn:
     st.write(" ")
@@ -235,11 +253,13 @@ if search_clicked and query.strip():
             st.session_state.roster.append(new_player)
             st.success(f"Added **{data['name']}** ({data['position']}) | Era: {data['start_year']}-{data['end_year']}")
         else:
-            st.error("Player not found. Try entering their full name.")
+            st.warning(f"Could not automatically parse statistics for '{query}'. Please check spelling.")
 
+# Run Simulation
 engine = UFS4Engine(dirichlet_conc=dirichlet_alpha)
 results = engine.simulate(st.session_state.roster, n_samples=mc_iterations)
 
+# Leaderboard
 summary = []
 for idx, p in enumerate(st.session_state.roster):
     ufs_dist = results["composite_ufs"][idx]
@@ -272,6 +292,7 @@ with col_dist:
     fig_kde.update_layout(yaxis_title="UFS (0-100)", showlegend=False, height=350, margin=dict(l=20, r=20, t=30, b=20))
     st.plotly_chart(fig_kde, use_container_width=True)
 
+# Pairwise Dominance Matrix
 st.subheader("🎯 Pairwise Dominance Matrix: P(Row > Column)")
 names = [p["name"] for p in st.session_state.roster]
 df_pairwise = pd.DataFrame(
@@ -290,7 +311,8 @@ fig_heatmap = px.imshow(
 fig_heatmap.update_layout(height=400)
 st.plotly_chart(fig_heatmap, use_container_width=True)
 
-st.subheader("🕸️️ Pillar Profile Breakdown (Z-Scores)")
+# Pillar Radar Chart
+st.subheader("🕸 Pillar Profile Breakdown (Z-Scores)")
 radar_fig = go.Figure()
 for idx, p in enumerate(st.session_state.roster):
     radar_fig.add_trace(go.Scatterpolar(
